@@ -6,6 +6,15 @@ from django.conf import settings
 import certifi
 from rest_framework.decorators import api_view
 import os
+from django.http import JsonResponse
+from rich import _console
+from .models import DoctorAvailability
+from .models import Appointment
+from datetime import datetime
+
+
+
+
 # Connect to MongoDB
 client = MongoClient(settings.MONGO_URI, tls=True, tlsCAFile=certifi.where())
 db = client[settings.MONGO_DB_NAME]
@@ -77,30 +86,131 @@ class GetUserData(APIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-    @api_view(['GET'])
-    def get_dashboard_data(request):
-        from pymongo import MongoClient
-        
-        client = MongoClient("mongodb+srv://hmsbd64:<db_password>@cluster0.jof024m.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
-        
-        db = client["hsm_db"]  # your DB name
-        collection = db["DoctorDashboard"]  # your collection name
+class GetDashboardData(APIView):
+    def get(self, request):
+        client = MongoClient(settings.MONGO_URI, tls=True, tlsCAFile=certifi.where())
+        db = client[settings.MONGO_DB_NAME]
+        collection = db["DoctorDashboard"]
+        document = collection.find_one()
 
-        document = collection.find_one()  # get the first document
+        data = {
+            "DocID": document.get("DocID", 0) if document else 0,
+            "PendingAppointment": document.get("PendingAppointment", 0) if document else 0,
+            "RegisteredPatient": document.get("RegisteredPatient", 0) if document else 0,
+            "Referral": document.get("Referral", 0) if document else 0,
+            "OnlineConsultation": document.get("OnlineConsultation", 0) if document else 0,
+        }
+        return Response(data)
 
-        if document:
-            data = {
-                "PendingAppointment": document.get("PendingAppointment", 0),
-                "RegisteredPatient": document.get("RegisteredPatient", 0),
-                "Referral": document.get("Referral", 0),
-                "OnlineConsulation": document.get("OnlineConsulation", 0)
-            }
-        else:
-            data = {
-                "PendingAppointment": 0,
-                "RegisteredPatient": 0,
-                "Referral": 0,
-                "OnlineConsulation": 0
-            }
+class GetAppointmentsData(APIView):
+    def get(self, request):
+        client = MongoClient(settings.MONGO_URI, tls=True, tlsCAFile=certifi.where())
+        db = client[settings.MONGO_DB_NAME]
+        collection = db["Appointments"]
+
+        appointments = list(collection.find())
+
+        data = []
+        for doc in appointments:
+            data.append({
+                "AppointmentID": doc.get("AppointmentID", ""),
+                "PatientID": doc.get("PatientID", ""),
+                "DoctorID": doc.get("DoctorID", ""),
+                "SelectSpeciality": doc.get("SelectSpeciality", ""),
+                "SelectDoctor": doc.get("SelectDoctor", ""),
+                "AppointmentDate": doc.get("AppointmentDate", ""),
+                "Time_Slot": str(doc.get("Time_Slot", "")),
+                "AppointmentStatus": doc.get("AppointmentStatus", ""),
+                "Accepted": doc.get("Accepted", False),
+                "Phone": doc.get("Phone", "")
+            })
 
         return Response(data)
+    
+class GetPatientDashboardData(APIView):
+    def get(self, request):
+        client = MongoClient(settings.MONGO_URI, tls=True, tlsCAFile=certifi.where())
+        db = client["hsm_db"]
+        collection = db["PatientDashboard"]
+
+        data = collection.find_one()
+        if data:
+            response = {
+                "PatID": data.get("PatID", 0),
+                "PatPendingAppointment": data.get("PatPendingAppointment", 0),
+                "PatDoctorCount": data.get("PatDoctorCount", 0),
+                "PatDue": data.get("PatDue", 0)
+            }
+            return JsonResponse(response)
+        else:
+            return JsonResponse({"error": "Dashboard data not found"}, status=404)
+
+class DoctorCardListAPIView(APIView):
+    def get(self, request):
+        client = MongoClient(settings.MONGO_URI, tls=True, tlsCAFile=certifi.where())
+        db = client["hsm_db"]
+        collection = db["DoctorInfo"]
+
+        doctor_list = list(collection.find({}, {"_id": 0}))  # exclude Mongo _id
+        return Response(doctor_list)
+    
+class DoctorAvailabilityView(APIView):
+    def get(self, request, doc_id, weekday):
+        try:
+            client = MongoClient(settings.MONGO_URI, tls=True, tlsCAFile=certifi.where())
+            db = client["hsm_db"]
+            collection = db["DoctorAvailability"]
+
+            #  Use raw Mongo query instead of Django ORM
+            availability = collection.find_one({
+                "DocID": doc_id,
+                "DocWeekday": weekday
+            })
+
+            if availability:
+                return Response({
+                    "Timeslot1": availability.get("Timeslot1", "No"),
+                    "Timeslot2": availability.get("Timeslot2", "No"),
+                    "Timeslot3": availability.get("Timeslot3", "No"),
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response({"error": "No availability found."}, status=status.HTTP_404_NOT_FOUND)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+
+class GetAppointmentCount(APIView):
+    def get(self, request, doc_id, date):
+        try:
+            appointment_date = datetime.strptime(date, "%Y-%m-%d").date()
+            count = Appointment.objects.filter(doctor_id=doc_id, appointment_date=appointment_date).count()
+            return Response({"count": count}, status=status.HTTP_200_OK)
+        except ValueError:
+            return Response({"error": "Invalid date format. Use YYYY-MM-DD."}, status=status.HTTP_400_BAD_REQUEST)
+        
+
+
+class DoctorLoginView(APIView):
+    def post(self, request):
+        email = request.data.get("email")
+        password = request.data.get("password")
+
+        if not email or not password:
+            return Response({"error": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            client = MongoClient(settings.MONGO_URI, tls=True, tlsCAFile=certifi.where())
+            db = client["hsm_db"]
+            collection = db["DoctorInfo"]
+
+            doctor = collection.find_one({"DocEmail": email, "DocPassword": password})
+
+            if doctor:
+                doctor["_id"] = str(doctor["_id"])  # convert ObjectId to string
+                return Response({"success": True, "doctor": doctor}, status=status.HTTP_200_OK)
+            else:
+                return Response({"success": False, "message": "Invalid credentials"}, status=status.HTTP_401_UNAUTHORIZED)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
